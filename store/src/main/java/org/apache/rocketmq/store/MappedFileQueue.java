@@ -152,6 +152,7 @@ public class MappedFileQueue {
             Arrays.sort(files);
             for (File file : files) {
 
+                //如果文件大小与配置文件的单个文件大小不一致，将忽略该目录下所有文件，直接返回false
                 if (file.length() != this.mappedFileSize) {
                     log.warn(file + "\t" + file.length()
                         + " length not matched message store config value, please check it manually");
@@ -159,6 +160,7 @@ public class MappedFileQueue {
                 }
 
                 try {
+                    //创建MappedFile对象
                     MappedFile mappedFile = new MappedFile(file.getPath(), mappedFileSize);
 
                     mappedFile.setWrotePosition(this.mappedFileSize);

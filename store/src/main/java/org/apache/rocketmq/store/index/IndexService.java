@@ -21,6 +21,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import org.apache.rocketmq.common.UtilAll;
@@ -43,7 +44,7 @@ public class IndexService {
     private final int hashSlotNum;
     private final int indexNum;
     private final String storePath;
-    private final ArrayList<IndexFile> indexFileList = new ArrayList<IndexFile>();
+    private final CopyOnWriteArrayList<IndexFile> indexFileList = new CopyOnWriteArrayList<>();
     private final ReadWriteLock readWriteLock = new ReentrantReadWriteLock();
 
     public IndexService(final DefaultMessageStore store) {
@@ -295,6 +296,7 @@ public class IndexService {
         long lastUpdateEndPhyOffset = 0;
         long lastUpdateIndexTimestamp = 0;
 
+
         {
             this.readWriteLock.readLock().lock();
             if (!this.indexFileList.isEmpty()) {
@@ -367,6 +369,10 @@ public class IndexService {
     }
 
     public void shutdown() {
+
+    }
+
+    public static void main(String[] args) {
 
     }
 }

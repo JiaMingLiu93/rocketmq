@@ -172,16 +172,25 @@ public class DefaultMessageStore implements MessageStore {
     }
 
     /**
+     * 故障恢复：
+     * 由于RocketMQ 存储首先将消息全量存储在Commitlog 文件中，然后异步生成转发任
+     * 务更新ConsumeQueue 、Index 文件。如果消息成功存储到Commitlog 文件中，转发任务未
+     * 成功执行，此时消息服务器Broker 由于某个原因看机，导致Commitlog 、ConsumeQueue 、
+     * IndexFile 文件数据不一致。如果不加以人工修复的话，会有一部分消息即便在Commitlog
+     * 文件中存在，但由于并没有转发到Consumequeue ，这部分消息将永远不会被消费者消费。
+     * 该方法可以使Commitlog 、消息消费队列（ ConsumeQueue ）达到最终一致性
      * @throws IOException
      */
     public boolean load() {
         boolean result = true;
 
         try {
+            //判断abort文件是否存在，如果存在，则说明是异常关闭，否则正常关闭
             boolean lastExitOK = !this.isTempFileExist();
             log.info("last shutdown {}", lastExitOK ? "normally" : "abnormally");
 
             if (null != scheduleMessageService) {
+                //加载延迟队列，和定时消息相关，TODO 需要继续深入
                 result = result && this.scheduleMessageService.load();
             }
 
@@ -1346,6 +1355,13 @@ public class DefaultMessageStore implements MessageStore {
         }
     }
 
+    /**
+     * 其实现机制是Broker 在启动时创建$｛ ROCKETMQ_
+     * HOME} /store/abort 文件，在退出时通过注册JVM钩子函数删除abort文件。如果下一次启
+     * 动时存在abort 文件。说明Broker 是异常退出的， Commitlog 与Consumequeue 数据有可能
+     * 不一致，需要进行修复
+     * @return
+     */
     private boolean isTempFileExist() {
         String fileName = StorePathConfigHelper.getAbortFile(this.messageStoreConfig.getStorePathRootDir());
         File file = new File(fileName);
@@ -1836,6 +1852,10 @@ public class DefaultMessageStore implements MessageStore {
         }
     }
 
+    /**
+     * 消息转发服务
+     * 用来更新ConsumeQueue、IndexFile文件
+     */
     class ReputMessageService extends ServiceThread {
 
         private volatile long reputFromOffset = 0;
@@ -1874,6 +1894,7 @@ public class DefaultMessageStore implements MessageStore {
         }
 
         private void doReput() {
+            //reputFromOffset表示从commitLog哪个位置开始转发消息
             if (this.reputFromOffset < DefaultMessageStore.this.commitLog.getMinOffset()) {
                 log.warn("The reputFromOffset={} is smaller than minPyOffset={}, this usually indicate that the dispatch behind too much and the commitlog has expired.",
                     this.reputFromOffset, DefaultMessageStore.this.commitLog.getMinOffset());
@@ -1881,25 +1902,36 @@ public class DefaultMessageStore implements MessageStore {
             }
             for (boolean doNext = true; this.isCommitLogAvailable() && doNext; ) {
 
+                //如果允许消息重复转发，且reputFromOffset大于消息提交位置confirmOffset，则跳出循环，不做转发
                 if (DefaultMessageStore.this.getMessageStoreConfig().isDuplicationEnable()
                     && this.reputFromOffset >= DefaultMessageStore.this.getConfirmOffset()) {
                     break;
                 }
 
+                //根据reputFromOffset从commitLog中获得所有消息
+                //比如reputFromOffset是10，那么就会拿到从10这个位置以后的数据，然后封装成SelectMappedBufferResult
                 SelectMappedBufferResult result = DefaultMessageStore.this.commitLog.getData(reputFromOffset);
                 if (result != null) {
                     try {
                         this.reputFromOffset = result.getStartOffset();
 
+                        //遍历SelectMappedBufferResult，因为可能有多条消息，一条条处理
                         for (int readSize = 0; readSize < result.getSize() && doNext; ) {
+                            //校验结果字节，即result.getByteBuffer()，这里面是一个个字节，比如10 89 2f ... 这种格式，一条消息最终存储到文件中就是以这种
+                            //二进制的形式存储的
+                            //为什么是在这看到的是字节呢，不是一个bit一个bit呢？因为计算机在最开始设计的时候，就设计成一次能拿到8个bit，也就是一个字节，自然
+                            //读写的时候也是以字节为单位了
                             DispatchRequest dispatchRequest =
                                 DefaultMessageStore.this.commitLog.checkMessageAndReturnSize(result.getByteBuffer(), false, false);
                             int size = dispatchRequest.getBufferSize() == -1 ? dispatchRequest.getMsgSize() : dispatchRequest.getBufferSize();
 
+                            //如果当前这条消息解析正确，即格式对上了，那么就算成功
                             if (dispatchRequest.isSuccess()) {
                                 if (size > 0) {
+                                    //接着就转发，这是个同步接口
                                     DefaultMessageStore.this.doDispatch(dispatchRequest);
 
+                                    //转发完之后，如果当前broker是master，且允许长轮询，就会通知监听者消息到达，也即消息转发了
                                     if (BrokerRole.SLAVE != DefaultMessageStore.this.getMessageStoreConfig().getBrokerRole()
                                         && DefaultMessageStore.this.brokerConfig.isLongPollingEnable()) {
                                         DefaultMessageStore.this.messageArrivingListener.arriving(dispatchRequest.getTopic(),
@@ -1908,8 +1940,10 @@ public class DefaultMessageStore implements MessageStore {
                                             dispatchRequest.getBitMap(), dispatchRequest.getPropertiesMap());
                                     }
 
+                                    //当前这条消息转发成功后，就应该把转发起始位置往后移了
                                     this.reputFromOffset += size;
                                     readSize += size;
+                                    //如果当前broker是slave，就记录当前消息对应topic的转发次数和消息大小，有什么用呢？做统计用吗？
                                     if (DefaultMessageStore.this.getMessageStoreConfig().getBrokerRole() == BrokerRole.SLAVE) {
                                         DefaultMessageStore.this.storeStatsService
                                             .getSinglePutMessageTopicTimesTotal(dispatchRequest.getTopic()).incrementAndGet();
@@ -1918,7 +1952,12 @@ public class DefaultMessageStore implements MessageStore {
                                             .addAndGet(dispatchRequest.getMsgSize());
                                     }
                                 } else if (size == 0) {
+                                    //如果当前消息大小为0，则获得下一个commitLog文件的起始偏移量，然后赋值给reputFromOffset
                                     this.reputFromOffset = DefaultMessageStore.this.commitLog.rollNextFile(this.reputFromOffset);
+                                    //接着设置readSize为已读结果的大小，使得跳出内层循环，即遍历result这层，因为要重新根据reputFromOffset
+                                    //从commitLog中获取数据，即SelectMappedBufferResult，再来遍历该result
+                                    //从这可以看出，每次DefaultMessageStore.this.commitLog.getData(reputFromOffset)都是获取一个文件的所有数据，
+                                    //并不是所有commitLog文件的数据
                                     readSize = result.getSize();
                                 }
                             } else if (!dispatchRequest.isSuccess()) {
@@ -1954,6 +1993,7 @@ public class DefaultMessageStore implements MessageStore {
 
             while (!this.isStopped()) {
                 try {
+                    //每休息1毫秒转发一次，达到准实时转发，这样就不会给消息消费带来延迟
                     Thread.sleep(1);
                     this.doReput();
                 } catch (Exception e) {

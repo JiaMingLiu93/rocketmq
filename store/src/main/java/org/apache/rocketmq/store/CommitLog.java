@@ -1162,6 +1162,14 @@ public class CommitLog {
         return null;
     }
 
+    /**
+     * 获取offset所在文件的下一个文件的起始偏移量
+     * 比如mappedFileSize为4
+     * 按照commitLog文件命名方式，第一个文件名称为0，第二个为4，第三个为8
+     * 假设入参offset为7，7+4-7%4=8，则返回第三个文件
+     * @param offset
+     * @return
+     */
     public long rollNextFile(final long offset) {
         int mappedFileSize = this.defaultMessageStore.getMessageStoreConfig().getMappedFileSizeCommitLog();
         return offset + mappedFileSize - offset % mappedFileSize;

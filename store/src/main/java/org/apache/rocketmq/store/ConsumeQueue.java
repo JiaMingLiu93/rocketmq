@@ -395,6 +395,7 @@ public class ConsumeQueue {
                         topic, queueId, request.getCommitLogOffset());
                 }
             }
+            //将消息的位置信息写入到consumeQueue中，注意：仅仅是消息的位置信息，即在commitLog中的偏移量
             boolean result = this.putMessagePositionInfo(request.getCommitLogOffset(),
                 request.getMsgSize(), tagsCode, request.getConsumeQueueOffset());
             if (result) {
@@ -425,22 +426,27 @@ public class ConsumeQueue {
     private boolean putMessagePositionInfo(final long offset, final int size, final long tagsCode,
         final long cqOffset) {
 
+        //如果当前这条消息在commitLog中的偏移量加上消息大小小于等于最大物理偏移量，说明这条消息可能已经记录，因此返回true，保证了幂等性
         if (offset + size <= this.maxPhysicOffset) {
             log.warn("Maybe try to build consume queue repeatedly maxPhysicOffset={} phyOffset={}", maxPhysicOffset, offset);
             return true;
         }
 
+        //组装consumeQueue存入的数据，就20个字节
         this.byteBufferIndex.flip();
         this.byteBufferIndex.limit(CQ_STORE_UNIT_SIZE);
         this.byteBufferIndex.putLong(offset);
         this.byteBufferIndex.putInt(size);
         this.byteBufferIndex.putLong(tagsCode);
 
+        //这里用cqOffset(consumeQueueOffset)乘以20字节数，得到一个物理地址，即文件中的偏移量
+        //说明cqOffset是一个逻辑的偏移量，应该是以一条消息为单位的
         final long expectLogicOffset = cqOffset * CQ_STORE_UNIT_SIZE;
 
         MappedFile mappedFile = this.mappedFileQueue.getLastMappedFile(expectLogicOffset);
         if (mappedFile != null) {
 
+            //如果该ConsumeQueue文件是第一次添加消息，则需要在文件开头加空白，可能是格式要求
             if (mappedFile.isFirstCreateInQueue() && cqOffset != 0 && mappedFile.getWrotePosition() == 0) {
                 this.minLogicOffset = expectLogicOffset;
                 this.mappedFileQueue.setFlushedWhere(expectLogicOffset);
@@ -450,15 +456,20 @@ public class ConsumeQueue {
                     + mappedFile.getWrotePosition());
             }
 
+            //如果consumeQueueOffset不为0，即该ConsumeQueue文件之前存过数据
             if (cqOffset != 0) {
+
+                //获得当前ConsumeQueue文件的偏移量
                 long currentLogicOffset = mappedFile.getWrotePosition() + mappedFile.getFileFromOffset();
 
+                //校验
                 if (expectLogicOffset < currentLogicOffset) {
                     log.warn("Build  consume queue repeatedly, expectLogicOffset: {} currentLogicOffset: {} Topic: {} QID: {} Diff: {}",
                         expectLogicOffset, currentLogicOffset, this.topic, this.queueId, expectLogicOffset - currentLogicOffset);
                     return true;
                 }
 
+                //校验，打日志，但还是继续写入
                 if (expectLogicOffset != currentLogicOffset) {
                     LOG_ERROR.warn(
                         "[BUG]logic queue order maybe wrong, expectLogicOffset: {} currentLogicOffset: {} Topic: {} QID: {} Diff: {}",
@@ -470,6 +481,7 @@ public class ConsumeQueue {
                     );
                 }
             }
+            //记录该消费队列的最大物理偏移量，可能不是连续的，但应该是一直增大的，用来实现写入的幂等性
             this.maxPhysicOffset = offset + size;
             return mappedFile.appendMessage(this.byteBufferIndex.array());
         }
