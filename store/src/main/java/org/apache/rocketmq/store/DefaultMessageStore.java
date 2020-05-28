@@ -201,6 +201,8 @@ public class DefaultMessageStore implements MessageStore {
             result = result && this.loadConsumeQueue();
 
             if (result) {
+                //加载存储检测点，检测点主要记录commitlog 文件、Consumequeue 文件、
+                //Index 索引文件的刷盘点，将在下文的文件刷盘机制中再次提交
                 this.storeCheckpoint =
                     new StoreCheckpoint(StorePathConfigHelper.getStoreCheckpoint(this.messageStoreConfig.getStorePathRootDir()));
 
@@ -1369,15 +1371,21 @@ public class DefaultMessageStore implements MessageStore {
     }
 
     private boolean loadConsumeQueue() {
+        //先获取ConsumeQueue根目录
         File dirLogic = new File(StorePathConfigHelper.getStorePathConsumeQueue(this.messageStoreConfig.getStorePathRootDir()));
+        //列出根目录下所有的topic文件夹
         File[] fileTopicList = dirLogic.listFiles();
         if (fileTopicList != null) {
 
+            //对每个topic文件夹遍历
             for (File fileTopic : fileTopicList) {
                 String topic = fileTopic.getName();
 
+                //列出每个topic下的队列文件夹
                 File[] fileQueueIdList = fileTopic.listFiles();
                 if (fileQueueIdList != null) {
+                    //遍历每个队列文件夹，封装成ConsumeQueue
+                    //队列文件夹下是一个个队列文件，因为每个队列文件是固定大小的，所以消息一多的话会产生多个文件
                     for (File fileQueueId : fileQueueIdList) {
                         int queueId;
                         try {
@@ -1392,6 +1400,7 @@ public class DefaultMessageStore implements MessageStore {
                             this.getMessageStoreConfig().getMappedFileSizeConsumeQueue(),
                             this);
                         this.putConsumeQueue(topic, queueId, logic);
+                        //加载每个队列文件夹下的队列文件
                         if (!logic.load()) {
                             return false;
                         }
@@ -1450,6 +1459,10 @@ public class DefaultMessageStore implements MessageStore {
         return maxPhysicOffset;
     }
 
+    /**
+     * 在CommitLog 实例中保存每个消息消费队列当前的存储逻辑偏移量， 这也是消息中不仅存储主题、消息队列ID 还存储了消息队列偏移量
+     * 的关键所在
+     */
     public void recoverTopicQueueTable() {
         HashMap<String/* topic-queueid */, Long/* offset */> table = new HashMap<String, Long>(1024);
         long minPhyOffset = this.commitLog.getMinOffset();

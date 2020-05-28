@@ -169,24 +169,32 @@ public class CommitLog {
         final List<MappedFile> mappedFiles = this.mappedFileQueue.getMappedFiles();
         if (!mappedFiles.isEmpty()) {
             // Began to recover from the last third file
+            // 从倒数第三个文件开始恢复
             int index = mappedFiles.size() - 3;
+            //如果不足三个文件，则从第一个文件开始
             if (index < 0)
                 index = 0;
 
             MappedFile mappedFile = mappedFiles.get(index);
             ByteBuffer byteBuffer = mappedFile.sliceByteBuffer();
+            //Commitlog文件已确认的物理偏移量，等于mappedFile.getFileFromOffset加
+            //上mappedFileOffset
             long processOffset = mappedFile.getFileFromOffset();
+            //当前文件已校验通过的offset
             long mappedFileOffset = 0;
+            //循环取出commitLog中的消息，在取出的时候会做校验
             while (true) {
                 DispatchRequest dispatchRequest = this.checkMessageAndReturnSize(byteBuffer, checkCRCOnRecover);
                 int size = dispatchRequest.getMsgSize();
                 // Normal data
+                // mappedFileOffset往后移动消息大小的距离
                 if (dispatchRequest.isSuccess() && size > 0) {
                     mappedFileOffset += size;
                 }
                 // Come the end of the file, switch to the next file Since the
                 // return 0 representatives met last hole,
                 // this can not be included in truncate offset
+                // 和org.apache.rocketmq.store.DefaultMessageStore.ReputMessageService.doReput这里的逻辑类似
                 else if (dispatchRequest.isSuccess() && size == 0) {
                     index++;
                     if (index >= mappedFiles.size()) {
@@ -196,6 +204,7 @@ public class CommitLog {
                     } else {
                         mappedFile = mappedFiles.get(index);
                         byteBuffer = mappedFile.sliceByteBuffer();
+                        //如果有下一个文件，重置processOffset，mappedFileOffset，继续循环
                         processOffset = mappedFile.getFileFromOffset();
                         mappedFileOffset = 0;
                         log.info("recover next physics file, " + mappedFile.getFileName());
@@ -216,6 +225,7 @@ public class CommitLog {
             // Clear ConsumeQueue redundant data
             if (maxPhyOffsetOfConsumeQueue >= processOffset) {
                 log.warn("maxPhyOffsetOfConsumeQueue({}) >= processOffset({}), truncate dirty logic files", maxPhyOffsetOfConsumeQueue, processOffset);
+                //删除processOffset之后的所有文件，即清除冗余数据
                 this.defaultMessageStore.truncateDirtyLogicFiles(processOffset);
             }
         } else {
@@ -429,6 +439,7 @@ public class CommitLog {
             // Looking beginning to recover from which file
             int index = mappedFiles.size() - 1;
             MappedFile mappedFile = null;
+            //从后往前找，找到第一个有效的文件
             for (; index >= 0; index--) {
                 mappedFile = mappedFiles.get(index);
                 if (this.isMappedFileMatchedRecover(mappedFile)) {
@@ -437,6 +448,7 @@ public class CommitLog {
                 }
             }
 
+            //如果没找到，取第一个文件
             if (index < 0) {
                 index = 0;
                 mappedFile = mappedFiles.get(index);
@@ -502,6 +514,7 @@ public class CommitLog {
             log.warn("The commitlog files are deleted, and delete the consume queue files");
             this.mappedFileQueue.setFlushedWhere(0);
             this.mappedFileQueue.setCommittedWhere(0);
+            //销毁消息消费队列文件
             this.defaultMessageStore.destroyLogics();
         }
     }
@@ -509,6 +522,8 @@ public class CommitLog {
     private boolean isMappedFileMatchedRecover(final MappedFile mappedFile) {
         ByteBuffer byteBuffer = mappedFile.sliceByteBuffer();
 
+        //首先判断文件的魔数，如果不是MESSAGE MAGIC_CODE ，返回false ，表示
+        //该文件不符合commitlog 消息文件的存储格式
         int magicCode = byteBuffer.getInt(MessageDecoder.MESSAGE_MAGIC_CODE_POSTION);
         if (magicCode != MESSAGE_MAGIC_CODE) {
             return false;
@@ -518,10 +533,17 @@ public class CommitLog {
         int bornhostLength = (sysFlag & MessageSysFlag.BORNHOST_V6_FLAG) == 0 ? 8 : 20;
         int msgStoreTimePos = 4 + 4 + 4 + 4 + 4 + 8 + 8 + 4 + 8 + bornhostLength;
         long storeTimestamp = byteBuffer.getLong(msgStoreTimePos);
+        //如果文件中第一条消息的存储时间等于0 ， 返回false ，说明该消息存储文件中
+        //未存储任何消息
         if (0 == storeTimestamp) {
             return false;
         }
 
+        //对比文件第一条消息的时间戳与检测点，文件第一条消息的时间戳小于文
+        //件检测点说明该文件部分消息是可靠的， 则从该文件开始恢复。文件检测点中保存了
+        //Commitlog 文件、消息消费队列（ ConsumeQueue ） 、索引文件（ IndexFile ）的文件刷盘点，
+        //RocketMQ 默认选择这消息文件与消息消费队列这两个文件的时间刷盘点中最小值与消息文
+        //件第一消息的时间戳对比，如果messagelndexEnable 为true ， 表示索引文件的刷盘时间点也参与计算
         if (this.defaultMessageStore.getMessageStoreConfig().isMessageIndexEnable()
             && this.defaultMessageStore.getMessageStoreConfig().isMessageIndexSafe()) {
             if (storeTimestamp <= this.defaultMessageStore.getStoreCheckpoint().getMinTimestampIndex()) {

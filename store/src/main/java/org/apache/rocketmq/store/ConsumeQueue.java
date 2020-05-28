@@ -236,16 +236,21 @@ public class ConsumeQueue {
                 mappedFile.setCommittedPosition(0);
                 mappedFile.setFlushedPosition(0);
 
+                //循环从byteBuffer中获取一条条记录
                 for (int i = 0; i < logicFileSize; i += CQ_STORE_UNIT_SIZE) {
                     long offset = byteBuffer.getLong();
                     int size = byteBuffer.getInt();
                     long tagsCode = byteBuffer.getLong();
 
                     if (0 == i) {
+                        //如果是文件开始偏移量大于等于phyOffet，说明这个文件是在有效文件后面创建的，则删除，然后跳出循环
                         if (offset >= phyOffet) {
                             this.mappedFileQueue.deleteLastMappedFile();
                             break;
                         } else {
+                            //如果小于phyOffet，说明当前文件包含有效内容
+                            //pos表示当前文件的位置
+                            //offset表示消息在commitLog文件中的偏移量
                             int pos = i + CQ_STORE_UNIT_SIZE;
                             mappedFile.setWrotePosition(pos);
                             mappedFile.setCommittedPosition(pos);
@@ -260,6 +265,8 @@ public class ConsumeQueue {
 
                         if (offset >= 0 && size > 0) {
 
+                            //如果当前消息的偏移量大于等于phyOffet，说明该消息是无效的，直接返回
+                            //此时mappedFile的wrotePosition、commitedPosition、flushedPosition都已经在之前的循环设置好了
                             if (offset >= phyOffet) {
                                 return;
                             }
@@ -557,6 +564,10 @@ public class ConsumeQueue {
         this.maxPhysicOffset = maxPhysicOffset;
     }
 
+    /**
+     * 重置ConsumeQueue 的maxPhysicOffset 与minLogicOffset ， 然后调用MappedFileQueue
+     * 的destroy方法将消息消费队列目录下的所有文件全部删除。
+     */
     public void destroy() {
         this.maxPhysicOffset = -1;
         this.minLogicOffset = 0;
